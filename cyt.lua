@@ -54,6 +54,7 @@ local State = {
 }
 
 local MAX_CAN_RANGE = 32
+local PurifierBusy = false
 local PurifiedRegistry = {
 	ByInstance = setmetatable({}, { __mode = "k" }),
 	ByName = {}
@@ -204,11 +205,22 @@ local function equipToolDirect(tool: Tool, delaySeconds: number?): boolean
 end
 
 local function unequipCurrentTool()
+	local char = LocalPlayer.Character
 	local hum = getHumanoid()
 	if hum then
 		pcall(function()
 			hum:UnequipTools()
 		end)
+	end
+	if char then
+		local backpack = LocalPlayer:FindFirstChild("Backpack")
+		for _, child in ipairs(char:GetChildren()) do
+			if child:IsA("Tool") and backpack then
+				pcall(function()
+					child.Parent = backpack
+				end)
+			end
+		end
 	end
 end
 
@@ -522,7 +534,7 @@ CanTab:CreateToggle({
 })
 
 -- ==========================================
--- TAB 3: WATER PURIFIER AUTOMATION (PRESERVED)
+-- TAB 3: WATER PURIFIER AUTOMATION (LOCKED SINGLE-CYCLE)
 -- ==========================================
 local function findPurifierRemote(name: string): RemoteFunction?
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -658,54 +670,88 @@ local function tryClaimPurifiedCan(): boolean
 end
 
 local function stepWaterPurifier()
+	-- Never search or start a new can while one is already in the machine
+	if PurifierBusy then
+		return
+	end
+
 	local tool = findBestUnpurifiedCanFast()
 	if not tool then
 		return
 	end
 
+	PurifierBusy = true
 	local canName = tool.Name
-	if not equipToolDirect(tool, State.EquipDelay) then
-		return
-	end
 
-	if not State.AutoPurify then return end
-	if not startPurification() then
-		return
-	end
-
-	markPurified(tool)
-
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	local claimed = false
-	local claimedTool: Tool? = nil
-	local addedConn: RBXScriptConnection? = nil
-
-	if backpack then
-		addedConn = backpack.ChildAdded:Connect(function(item)
-			if item:IsA("Tool") then
-				claimedTool = item
-			end
-		end)
-	end
-
-	local elapsed = 0
-	while State.AutoPurify and elapsed < State.MaxPurifyWait do
-		if tryClaimPurifiedCan() then
-			claimed = true
-			break
+	local ok, err = pcall(function()
+		if not equipToolDirect(tool, State.EquipDelay) then
+			return
 		end
-		task.wait(State.ClaimPollInterval)
-		elapsed += State.ClaimPollInterval
-	end
 
-	if addedConn then
-		addedConn:Disconnect()
-	end
+		if not State.AutoPurify then return end
+		if not startPurification() then
+			return
+		end
 
-	if claimed and claimedTool then
-		markPurified(claimedTool)
-	elseif claimed then
-		PurifiedRegistry.ByName[canName] = true
+		-- Mark ONLY the can placed into the machine as purified
+		markPurified(tool)
+
+		-- Must hold nothing after starting purification
+		task.wait(0.05)
+		unequipCurrentTool()
+
+		local backpack = LocalPlayer:FindFirstChild("Backpack")
+		local claimed = false
+		local claimedTool: Tool? = nil
+		local addedConn: RBXScriptConnection? = nil
+
+		if backpack then
+			addedConn = backpack.ChildAdded:Connect(function(item)
+				if item:IsA("Tool") then
+					claimedTool = item
+				end
+			end)
+		end
+
+		-- Wait based on Max Timer Wait before finishing/claiming and searching again
+		local elapsed = 0
+		while State.AutoPurify and elapsed < State.MaxPurifyWait do
+			local stepWait = math.min(State.ClaimPollInterval, State.MaxPurifyWait - elapsed)
+			if stepWait > 0 then
+				task.wait(stepWait)
+				elapsed += stepWait
+			else
+				break
+			end
+
+			if tryClaimPurifiedCan() then
+				claimed = true
+				break
+			end
+		end
+
+		-- Final claim attempt once Max Timer Wait is reached
+		if State.AutoPurify and not claimed then
+			if tryClaimPurifiedCan() then
+				claimed = true
+			end
+		end
+
+		if addedConn then
+			addedConn:Disconnect()
+		end
+
+		if claimed and claimedTool then
+			markPurified(claimedTool)
+		elseif claimed then
+			PurifiedRegistry.ByName[canName] = true
+		end
+	end)
+
+	PurifierBusy = false
+
+	if not ok then
+		warn("[Water Purifier Error]", tostring(err))
 	end
 end
 
@@ -820,7 +866,7 @@ PurifierTab:CreateToggle({
 		if Value then
 			Rayfield:Notify({
 				Title = "Water Purifier Active",
-				Content = "Fast-scanning inventory for unpurified cans.",
+				Content = "Waiting for timer & claim before searching for next can.",
 				Duration = 3
 			})
 			task.spawn(stepWaterPurifier)
@@ -993,7 +1039,7 @@ end)
 
 task.spawn(function()
 	while true do
-		if State.AutoPurify then
+		if State.AutoPurify and not PurifierBusy then
 			pcall(stepWaterPurifier)
 		end
 		task.wait(State.PurifyCycleInterval)
