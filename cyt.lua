@@ -1,14 +1,20 @@
+if getgenv().ChopYourTreeHub and type(getgenv().ChopYourTreeHub.Unload) == "function" then
+	pcall(getgenv().ChopYourTreeHub.Unload)
+	task.wait(0.2)
+end
+
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 
 local Window = Rayfield:CreateWindow({
 	Name = "Chop Your Tree | Hub",
 	LoadingTitle = "Chop Your Tree Automation",
-	LoadingSubtitle = "Event Currency, Watering Cans & Purifier",
+	LoadingSubtitle = "Event Currency, Watering Cans, Purifier & Player",
 	ConfigurationSaving = {
 		Enabled = true,
 		FolderName = "ChopYourTree_Rayfield",
@@ -21,14 +27,19 @@ local EventTab = Window:CreateTab("Event Farm", 4483362458)
 local CanTab = Window:CreateTab("Watering Cans", 4483362458)
 local PurifierTab = Window:CreateTab("Water Purifier", 4483362458)
 local EquipTab = Window:CreateTab("Can Equipper", 4483362458)
+local PlayerTab = Window:CreateTab("Player", 4483362458)
 
 local State = {
-	-- Event Farm State
+	Running = true,
+
+	-- Event Farm & Tapping State
 	AutoCollect = false,
 	Mode = "TouchInterest (Silent / No TP)",
 	ScanInterval = 0.25,
 	TeleportDelay = 0.08,
 	ReturnToStart = true,
+	AutoTapTree = false,
+	TapInterval = 0.08,
 
 	-- Watering Can Auto-Pickup State
 	AutoPickupCans = false,
@@ -50,15 +61,41 @@ local State = {
 	-- Can Equipper State
 	AutoHoldHighestXp = false,
 	AutoHoldLowestXp = false,
-	AutoEquipInterval = 0.5
+	AutoEquipInterval = 0.5,
+
+	-- Player Utility State
+	AutoPrestige = false,
+	PrestigeInterval = 5,
+	SpeedHack = false,
+	SpeedAmount = 60
 }
 
 local MAX_CAN_RANGE = 32
+local DEFAULT_WALKSPEED = 16
 local PurifierBusy = false
 local PurifiedRegistry = {
 	ByInstance = setmetatable({}, { __mode = "k" }),
 	ByName = {}
 }
+
+local Threads = {}
+local Connections = {}
+
+local function trackThread(name: string, fn: () -> ())
+	if Threads[name] then
+		pcall(function() task.cancel(Threads[name]) end)
+	end
+	Threads[name] = task.spawn(fn)
+	return Threads[name]
+end
+
+local function trackConnection(name: string, conn: RBXScriptConnection)
+	if Connections[name] then
+		pcall(function() Connections[name]:Disconnect() end)
+	end
+	Connections[name] = conn
+	return conn
+end
 
 local function getRootPart(): BasePart?
 	local char = LocalPlayer.Character
@@ -69,6 +106,31 @@ end
 local function getHumanoid(): Humanoid?
 	local char = LocalPlayer.Character
 	return char and char:FindFirstChildWhichIsA("Humanoid")
+end
+
+local function setWalkSpeed(speed: number)
+	local hum = getHumanoid()
+	if hum then
+		pcall(function()
+			hum.WalkSpeed = speed
+		end)
+	end
+end
+
+local function getPlayerPlot(): Instance?
+	local plotVal = LocalPlayer:FindFirstChild("Plot")
+	if plotVal and plotVal:IsA("ObjectValue") and plotVal.Value then
+		return plotVal.Value
+	end
+	local plots = Workspace:FindFirstChild("Plots")
+	if plots then
+		for _, plot in ipairs(plots:GetChildren()) do
+			if plot:GetAttribute("Plr") == LocalPlayer.Name then
+				return plot
+			end
+		end
+	end
+	return nil
 end
 
 -- ==========================================
@@ -225,7 +287,7 @@ local function unequipCurrentTool()
 end
 
 -- ==========================================
--- TAB 1: EVENT CURRENCY COLLECTOR (PRESERVED)
+-- TAB 1: EVENT CURRENCY COLLECTOR & TREE TAP
 -- ==========================================
 local function getCoinHitbox(obj: Instance): BasePart?
 	if obj.Name == "EventCurrency" then
@@ -275,7 +337,7 @@ local function collectAllExistingCoins()
 	local collectedAny = false
 
 	for _, child in ipairs(Workspace:GetChildren()) do
-		if not State.AutoCollect then break end
+		if not State.Running or not State.AutoCollect then break end
 		local hb = getCoinHitbox(child)
 		if hb then
 			collectSingleCoin(hb)
@@ -291,8 +353,39 @@ local function collectAllExistingCoins()
 	end
 end
 
-Workspace.ChildAdded:Connect(function(child)
-	if not State.AutoCollect then return end
+local function stepAutoTapTree()
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+	if not remotes then return end
+
+	local tapRemote = remotes:FindFirstChild("TapButtonClick")
+	local axeSwing = remotes:FindFirstChild("AxeSwing")
+	local treeClick = remotes:FindFirstChild("TreeClick")
+	local plot = getPlayerPlot()
+
+	if tapRemote and tapRemote:IsA("RemoteEvent") and plot then
+		pcall(function()
+			tapRemote:FireServer(plot)
+		end)
+	end
+
+	if axeSwing and axeSwing:IsA("RemoteEvent") then
+		pcall(function()
+			axeSwing:FireServer()
+		end)
+	end
+
+	if treeClick and treeClick:IsA("RemoteFunction") and plot then
+		local mainTree = plot:FindFirstChild("PlotContents") and plot.PlotContents:FindFirstChild("Tree")
+		if mainTree then
+			pcall(function()
+				treeClick:InvokeServer(mainTree)
+			end)
+		end
+	end
+end
+
+trackConnection("EventCoinAdded", Workspace.ChildAdded:Connect(function(child)
+	if not State.Running or not State.AutoCollect then return end
 	if child.Name == "EventCurrency" then
 		task.wait(0.05)
 		local hb = getCoinHitbox(child)
@@ -304,7 +397,7 @@ Workspace.ChildAdded:Connect(function(child)
 			end
 		end
 	end
-end)
+end))
 
 EventTab:CreateSection("Event Currency Collector")
 
@@ -357,6 +450,29 @@ EventTab:CreateToggle({
 			})
 			task.spawn(collectAllExistingCoins)
 		end
+	end
+})
+
+EventTab:CreateSection("Tree Tapping")
+
+EventTab:CreateSlider({
+	Name = "Auto-Tap Interval (Seconds)",
+	Range = {0.02, 0.5},
+	Increment = 0.01,
+	Suffix = "s",
+	CurrentValue = State.TapInterval,
+	Flag = "AutoTapIntervalSlider",
+	Callback = function(Value)
+		State.TapInterval = Value
+	end
+})
+
+EventTab:CreateToggle({
+	Name = "Auto-Tap Tree",
+	CurrentValue = false,
+	Flag = "AutoTapTreeToggle",
+	Callback = function(Value)
+		State.AutoTapTree = Value
 	end
 })
 
@@ -428,10 +544,10 @@ local function stepWateringCanPickup()
 	if not minXpThreshold then return end
 
 	for _, container in ipairs(mutations:GetChildren()) do
-		if not State.AutoPickupCans then return end
+		if not State.Running or not State.AutoPickupCans then return end
 
 		for _, desc in ipairs(container:GetDescendants()) do
-			if not State.AutoPickupCans then return end
+			if not State.Running or not State.AutoPickupCans then return end
 			if desc.Name == "WateringCan" and desc:IsA("Model") then
 				local xpLabel = desc:FindFirstChild("LevelBar")
 					and desc.LevelBar:FindFirstChild("Bar")
@@ -534,7 +650,7 @@ CanTab:CreateToggle({
 })
 
 -- ==========================================
--- TAB 3: WATER PURIFIER AUTOMATION (LOCKED SINGLE-CYCLE)
+-- TAB 3: WATER PURIFIER AUTOMATION (PRESERVED)
 -- ==========================================
 local function findPurifierRemote(name: string): RemoteFunction?
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -670,8 +786,7 @@ local function tryClaimPurifiedCan(): boolean
 end
 
 local function stepWaterPurifier()
-	-- Never search or start a new can while one is already in the machine
-	if PurifierBusy then
+	if PurifierBusy or not State.Running then
 		return
 	end
 
@@ -688,15 +803,13 @@ local function stepWaterPurifier()
 			return
 		end
 
-		if not State.AutoPurify then return end
+		if not State.Running or not State.AutoPurify then return end
 		if not startPurification() then
 			return
 		end
 
-		-- Mark ONLY the can placed into the machine as purified
 		markPurified(tool)
 
-		-- Must hold nothing after starting purification
 		task.wait(0.05)
 		unequipCurrentTool()
 
@@ -713,9 +826,8 @@ local function stepWaterPurifier()
 			end)
 		end
 
-		-- Wait based on Max Timer Wait before finishing/claiming and searching again
 		local elapsed = 0
-		while State.AutoPurify and elapsed < State.MaxPurifyWait do
+		while State.Running and State.AutoPurify and elapsed < State.MaxPurifyWait do
 			local stepWait = math.min(State.ClaimPollInterval, State.MaxPurifyWait - elapsed)
 			if stepWait > 0 then
 				task.wait(stepWait)
@@ -730,8 +842,7 @@ local function stepWaterPurifier()
 			end
 		end
 
-		-- Final claim attempt once Max Timer Wait is reached
-		if State.AutoPurify and not claimed then
+		if State.Running and State.AutoPurify and not claimed then
 			if tryClaimPurifiedCan() then
 				claimed = true
 			end
@@ -875,7 +986,7 @@ PurifierTab:CreateToggle({
 })
 
 -- ==========================================
--- TAB 4: CAN EQUIPPER (HIGHEST / LOWEST XP)
+-- TAB 4: CAN EQUIPPER (PRESERVED)
 -- ==========================================
 local function findExtremeXpCan(mode: "HIGHEST" | "LOWEST"): (Tool?, number?)
 	local chosenTool: Tool? = nil
@@ -1017,10 +1128,167 @@ EquipTab:CreateSlider({
 })
 
 -- ==========================================
--- BACKGROUND LOOPS
+-- TAB 5: PLAYER STATS, PRESTIGE & MOVEMENT
 -- ==========================================
-task.spawn(function()
-	while true do
+local function triggerPrestigeOnce()
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+	local prestigeRemote = remotes and remotes:FindFirstChild("Prestige")
+	if prestigeRemote and prestigeRemote:IsA("RemoteFunction") then
+		pcall(function()
+			prestigeRemote:InvokeServer()
+		end)
+	elseif prestigeRemote and prestigeRemote:IsA("RemoteEvent") then
+		pcall(function()
+			prestigeRemote:FireServer()
+		end)
+	end
+end
+
+local function formatLiveStats(): string
+	local coinsText = "N/A"
+	local prestigeText = "N/A"
+	local ls = LocalPlayer:FindFirstChild("leaderstats")
+	if ls then
+		for _, stat in ipairs(ls:GetChildren()) do
+			local lower = string.lower(stat.Name)
+			if string.find(lower, "coin", 1, true) then
+				coinsText = tostring(stat.Value)
+			elseif string.find(lower, "prest", 1, true) then
+				prestigeText = tostring(stat.Value)
+			end
+		end
+	end
+
+	local canCount = 0
+	local function countCans(container: Instance?)
+		if not container then return end
+		for _, item in ipairs(container:GetChildren()) do
+			if isWateringCanTool(item) then
+				canCount += 1
+			end
+		end
+	end
+	countCans(LocalPlayer.Character)
+	countCans(LocalPlayer:FindFirstChild("Backpack"))
+
+	return string.format("Coins: %s | Prestiges: %s | Cans Held/Bag: %d", coinsText, prestigeText, canCount)
+end
+
+PlayerTab:CreateSection("Live Stats")
+local StatsParagraph = PlayerTab:CreateParagraph({
+	Title = "Player Overview",
+	Content = formatLiveStats()
+})
+
+PlayerTab:CreateSection("Prestige")
+
+PlayerTab:CreateButton({
+	Name = "Prestige Now",
+	Callback = function()
+		triggerPrestigeOnce()
+		Rayfield:Notify({
+			Title = "Prestige Requested",
+			Content = "Sent prestige request to server.",
+			Duration = 2
+		})
+	end
+})
+
+PlayerTab:CreateSlider({
+	Name = "Auto-Prestige Interval (Seconds)",
+	Range = {1, 30},
+	Increment = 1,
+	Suffix = "s",
+	CurrentValue = State.PrestigeInterval,
+	Flag = "AutoPrestigeIntervalSlider",
+	Callback = function(Value)
+		State.PrestigeInterval = Value
+	end
+})
+
+PlayerTab:CreateToggle({
+	Name = "Auto-Prestige",
+	CurrentValue = false,
+	Flag = "AutoPrestigeToggle",
+	Callback = function(Value)
+		State.AutoPrestige = Value
+	end
+})
+
+PlayerTab:CreateSection("Movement")
+
+PlayerTab:CreateSlider({
+	Name = "WalkSpeed",
+	Range = {16, 200},
+	Increment = 2,
+	Suffix = "",
+	CurrentValue = State.SpeedAmount,
+	Flag = "WalkSpeedSlider",
+	Callback = function(Value)
+		State.SpeedAmount = Value
+		if State.SpeedHack then
+			setWalkSpeed(Value)
+		end
+	end
+})
+
+PlayerTab:CreateToggle({
+	Name = "WalkSpeed Boost",
+	CurrentValue = false,
+	Flag = "SpeedHackToggle",
+	Callback = function(Value)
+		State.SpeedHack = Value
+		if not Value then
+			setWalkSpeed(DEFAULT_WALKSPEED)
+		else
+			setWalkSpeed(State.SpeedAmount)
+		end
+	end
+})
+
+-- ==========================================
+-- CLEANUP & BACKGROUND LOOPS
+-- ==========================================
+local function unloadHub()
+	State.Running = false
+	State.AutoCollect = false
+	State.AutoTapTree = false
+	State.AutoPickupCans = false
+	State.AutoPurify = false
+	State.AutoHoldHighestXp = false
+	State.AutoHoldLowestXp = false
+	State.AutoPrestige = false
+	State.SpeedHack = false
+	PurifierBusy = false
+
+	setWalkSpeed(DEFAULT_WALKSPEED)
+
+	for name, thread in pairs(Threads) do
+		pcall(function() task.cancel(thread) end)
+		Threads[name] = nil
+	end
+
+	for name, conn in pairs(Connections) do
+		pcall(function() conn:Disconnect() end)
+		Connections[name] = nil
+	end
+
+	getgenv().ChopYourTreeHub = nil
+end
+
+getgenv().ChopYourTreeHub = {
+	State = State,
+	Unload = unloadHub
+}
+
+trackConnection("SpeedHeartbeat", RunService.Heartbeat:Connect(function()
+	if State.Running and State.SpeedHack then
+		setWalkSpeed(State.SpeedAmount)
+	end
+end))
+
+trackThread("EventCollectorLoop", function()
+	while State.Running do
 		if State.AutoCollect then
 			pcall(collectAllExistingCoins)
 		end
@@ -1028,8 +1296,17 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
-	while true do
+trackThread("AutoTapLoop", function()
+	while State.Running do
+		if State.AutoTapTree then
+			pcall(stepAutoTapTree)
+		end
+		task.wait(State.TapInterval)
+	end
+end)
+
+trackThread("CanPickupLoop", function()
+	while State.Running do
 		if State.AutoPickupCans then
 			pcall(stepWateringCanPickup)
 		end
@@ -1037,8 +1314,8 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
-	while true do
+trackThread("PurifierLoop", function()
+	while State.Running do
 		if State.AutoPurify and not PurifierBusy then
 			pcall(stepWaterPurifier)
 		end
@@ -1046,14 +1323,37 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
-	while true do
+trackThread("EquipperLoop", function()
+	while State.Running do
 		if State.AutoHoldHighestXp then
 			pcall(equipExtremeCan, "HIGHEST", false)
 		elseif State.AutoHoldLowestXp then
 			pcall(equipExtremeCan, "LOWEST", false)
 		end
 		task.wait(State.AutoEquipInterval)
+	end
+end)
+
+trackThread("PrestigeLoop", function()
+	while State.Running do
+		if State.AutoPrestige then
+			pcall(triggerPrestigeOnce)
+		end
+		task.wait(State.PrestigeInterval)
+	end
+end)
+
+trackThread("StatsLoop", function()
+	while State.Running do
+		if StatsParagraph then
+			pcall(function()
+				StatsParagraph:Set({
+					Title = "Player Overview",
+					Content = formatLiveStats()
+				})
+			end)
+		end
+		task.wait(1)
 	end
 end)
 
