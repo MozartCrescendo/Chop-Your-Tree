@@ -20,6 +20,7 @@ local Window = Rayfield:CreateWindow({
 local EventTab = Window:CreateTab("Event Farm", 4483362458)
 local CanTab = Window:CreateTab("Watering Cans", 4483362458)
 local PurifierTab = Window:CreateTab("Water Purifier", 4483362458)
+local EquipTab = Window:CreateTab("Can Equipper", 4483362458)
 
 local State = {
 	-- Event Farm State
@@ -44,7 +45,12 @@ local State = {
 	ClaimPollInterval = 0.35,
 	MaxPurifyWait = 60,
 	PrioritizeLowestXp = true,
-	MaxPurifyXpInput = ""
+	MaxPurifyXpInput = "",
+
+	-- Can Equipper State
+	AutoHoldHighestXp = false,
+	AutoHoldLowestXp = false,
+	AutoEquipInterval = 0.5
 }
 
 local MAX_CAN_RANGE = 32
@@ -115,6 +121,95 @@ local function parseSuffixedNumber(rawText: string?): number?
 	local key = string.upper(suffix or "")
 	local mult = SUFFIX_MULTIPLIERS[key] or 1
 	return baseNum * mult
+end
+
+local function isWateringCanTool(tool: Instance): boolean
+	if not tool:IsA("Tool") then return false end
+	local lower = string.lower(tool.Name)
+	if string.find(lower, "axe", 1, true) then
+		return false
+	end
+	if string.find(lower, "xp", 1, true)
+		or string.find(lower, "can", 1, true)
+		or string.find(lower, "water", 1, true)
+		or tool:GetAttribute("WateringCan") ~= nil
+	then
+		return true
+	end
+	return false
+end
+
+local function getToolXpValue(tool: Tool): number?
+	local xpVal = parseSuffixedNumber(tool.Name)
+	if xpVal then return xpVal end
+
+	for attrName, attrVal in pairs(tool:GetAttributes()) do
+		if string.find(string.lower(tostring(attrName)), "xp", 1, true) then
+			if type(attrVal) == "number" then
+				return attrVal
+			elseif type(attrVal) == "string" then
+				local parsed = parseSuffixedNumber(attrVal)
+				if parsed then return parsed end
+			end
+		end
+	end
+
+	for _, desc in ipairs(tool:GetDescendants()) do
+		if desc:IsA("TextLabel") then
+			local parsed = parseSuffixedNumber(desc.Text)
+			if parsed then return parsed end
+		elseif desc:IsA("NumberValue") or desc:IsA("IntValue") then
+			if string.find(string.lower(desc.Name), "xp", 1, true) then
+				return desc.Value
+			end
+		elseif desc:IsA("StringValue") then
+			if string.find(string.lower(desc.Name), "xp", 1, true) then
+				local parsed = parseSuffixedNumber(desc.Value)
+				if parsed then return parsed end
+			end
+		end
+	end
+
+	return nil
+end
+
+local function equipToolDirect(tool: Tool, delaySeconds: number?): boolean
+	local char = LocalPlayer.Character
+	local hum = getHumanoid()
+	if not (char and tool and tool.Parent) then
+		return false
+	end
+
+	if tool.Parent == char then
+		return true
+	end
+
+	if hum then
+		pcall(function()
+			hum:EquipTool(tool)
+		end)
+	end
+
+	if tool.Parent ~= char then
+		pcall(function()
+			tool.Parent = char
+		end)
+	end
+
+	if delaySeconds and delaySeconds > 0 then
+		task.wait(delaySeconds)
+	end
+
+	return tool.Parent == char
+end
+
+local function unequipCurrentTool()
+	local hum = getHumanoid()
+	if hum then
+		pcall(function()
+			hum:UnequipTools()
+		end)
+	end
 end
 
 -- ==========================================
@@ -427,7 +522,7 @@ CanTab:CreateToggle({
 })
 
 -- ==========================================
--- TAB 3: WATER PURIFIER AUTOMATION (FAST 80+ INVENTORY SCAN)
+-- TAB 3: WATER PURIFIER AUTOMATION (PRESERVED)
 -- ==========================================
 local function findPurifierRemote(name: string): RemoteFunction?
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -440,39 +535,6 @@ local function findPurifierRemote(name: string): RemoteFunction?
 	local fallback = ReplicatedStorage:FindFirstChild(name, true)
 	if fallback and fallback:IsA("RemoteFunction") then
 		return fallback
-	end
-	return nil
-end
-
-local function isWateringCanTool(tool: Instance): boolean
-	if not tool:IsA("Tool") then return false end
-	local lower = string.lower(tool.Name)
-	if string.find(lower, "axe", 1, true) then
-		return false
-	end
-	if string.find(lower, "xp", 1, true)
-		or string.find(lower, "can", 1, true)
-		or string.find(lower, "water", 1, true)
-		or tool:GetAttribute("WateringCan") ~= nil
-	then
-		return true
-	end
-	return false
-end
-
-local function getToolXpValue(tool: Tool): number?
-	local xpVal = parseSuffixedNumber(tool.Name)
-	if xpVal then return xpVal end
-
-	for attrName, attrVal in pairs(tool:GetAttributes()) do
-		if string.find(string.lower(tostring(attrName)), "xp", 1, true) then
-			if type(attrVal) == "number" then
-				return attrVal
-			elseif type(attrVal) == "string" then
-				local parsed = parseSuffixedNumber(attrVal)
-				if parsed then return parsed end
-			end
-		end
 	end
 	return nil
 end
@@ -543,36 +605,6 @@ local function findBestUnpurifiedCanFast(): Tool?
 	return bestTool
 end
 
-local function equipWateringCanInstant(tool: Tool): boolean
-	local char = LocalPlayer.Character
-	local hum = getHumanoid()
-	if not (char and tool and tool.Parent) then
-		return false
-	end
-
-	if tool.Parent == char then
-		return true
-	end
-
-	if hum then
-		pcall(function()
-			hum:EquipTool(tool)
-		end)
-	end
-
-	if tool.Parent ~= char then
-		pcall(function()
-			tool.Parent = char
-		end)
-	end
-
-	if State.EquipDelay > 0 then
-		task.wait(State.EquipDelay)
-	end
-
-	return tool.Parent == char
-end
-
 local function startPurification(): boolean
 	local startRemote = findPurifierRemote("WaterPurifier")
 	if startRemote then
@@ -632,7 +664,7 @@ local function stepWaterPurifier()
 	end
 
 	local canName = tool.Name
-	if not equipWateringCanInstant(tool) then
+	if not equipToolDirect(tool, State.EquipDelay) then
 		return
 	end
 
@@ -797,6 +829,148 @@ PurifierTab:CreateToggle({
 })
 
 -- ==========================================
+-- TAB 4: CAN EQUIPPER (HIGHEST / LOWEST XP)
+-- ==========================================
+local function findExtremeXpCan(mode: "HIGHEST" | "LOWEST"): (Tool?, number?)
+	local chosenTool: Tool? = nil
+	local chosenXp: number? = nil
+
+	local function scanContainer(container: Instance?)
+		if not container then return end
+		for _, child in ipairs(container:GetChildren()) do
+			if isWateringCanTool(child) then
+				local xp = getToolXpValue(child)
+				if xp then
+					if not chosenXp then
+						chosenXp = xp
+						chosenTool = child
+					elseif mode == "HIGHEST" and xp > chosenXp then
+						chosenXp = xp
+						chosenTool = child
+					elseif mode == "LOWEST" and xp < chosenXp then
+						chosenXp = xp
+						chosenTool = child
+					end
+				elseif not chosenTool then
+					chosenTool = child
+				end
+			end
+		end
+	end
+
+	scanContainer(LocalPlayer.Character)
+	scanContainer(LocalPlayer:FindFirstChild("Backpack"))
+
+	return chosenTool, chosenXp
+end
+
+local function equipExtremeCan(mode: "HIGHEST" | "LOWEST", notify: boolean): boolean
+	local tool, _ = findExtremeXpCan(mode)
+	if not tool then
+		if notify then
+			Rayfield:Notify({
+				Title = "No Watering Can Found",
+				Content = "No watering cans found in Character or Backpack.",
+				Duration = 2.5
+			})
+		end
+		return false
+	end
+
+	local ok = equipToolDirect(tool, 0)
+	if notify then
+		local label = mode == "HIGHEST" and "Highest XP Can" or "Lowest XP Can"
+		Rayfield:Notify({
+			Title = ok and ("Equipped " .. label) or "Equip Failed",
+			Content = tool.Name,
+			Duration = 2.5
+		})
+	end
+	return ok
+end
+
+EquipTab:CreateSection("Instant Hold by XP")
+
+EquipTab:CreateButton({
+	Name = "Hold Highest XP Can",
+	Callback = function()
+		equipExtremeCan("HIGHEST", true)
+	end
+})
+
+EquipTab:CreateButton({
+	Name = "Hold Lowest XP Can",
+	Callback = function()
+		equipExtremeCan("LOWEST", true)
+	end
+})
+
+EquipTab:CreateButton({
+	Name = "Unequip Held Can",
+	Callback = function()
+		unequipCurrentTool()
+		Rayfield:Notify({
+			Title = "Unequipped",
+			Content = "Returned held tool to Backpack.",
+			Duration = 2
+		})
+	end
+})
+
+EquipTab:CreateSection("Continuous Auto-Hold")
+
+local AutoHoldHighestToggle
+local AutoHoldLowestToggle
+
+AutoHoldHighestToggle = EquipTab:CreateToggle({
+	Name = "Auto-Hold Highest XP Can",
+	CurrentValue = false,
+	Flag = "AutoHoldHighestXpToggle",
+	Callback = function(Value)
+		State.AutoHoldHighestXp = Value
+		if Value then
+			if State.AutoHoldLowestXp then
+				State.AutoHoldLowestXp = false
+				if AutoHoldLowestToggle then
+					AutoHoldLowestToggle:Set(false)
+				end
+			end
+			equipExtremeCan("HIGHEST", false)
+		end
+	end
+})
+
+AutoHoldLowestToggle = EquipTab:CreateToggle({
+	Name = "Auto-Hold Lowest XP Can (Great for Trading)",
+	CurrentValue = false,
+	Flag = "AutoHoldLowestXpToggle",
+	Callback = function(Value)
+		State.AutoHoldLowestXp = Value
+		if Value then
+			if State.AutoHoldHighestXp then
+				State.AutoHoldHighestXp = false
+				if AutoHoldHighestToggle then
+					AutoHoldHighestToggle:Set(false)
+				end
+			end
+			equipExtremeCan("LOWEST", false)
+		end
+	end
+})
+
+EquipTab:CreateSlider({
+	Name = "Auto-Hold Check Interval (Seconds)",
+	Range = {0.1, 3.0},
+	Increment = 0.05,
+	Suffix = "s",
+	CurrentValue = State.AutoEquipInterval,
+	Flag = "AutoEquipIntervalSlider",
+	Callback = function(Value)
+		State.AutoEquipInterval = Value
+	end
+})
+
+-- ==========================================
 -- BACKGROUND LOOPS
 -- ==========================================
 task.spawn(function()
@@ -823,6 +997,17 @@ task.spawn(function()
 			pcall(stepWaterPurifier)
 		end
 		task.wait(State.PurifyCycleInterval)
+	end
+end)
+
+task.spawn(function()
+	while true do
+		if State.AutoHoldHighestXp then
+			pcall(equipExtremeCan, "HIGHEST", false)
+		elseif State.AutoHoldLowestXp then
+			pcall(equipExtremeCan, "LOWEST", false)
+		end
+		task.wait(State.AutoEquipInterval)
 	end
 end)
 
