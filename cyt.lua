@@ -9,12 +9,14 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
 local LocalPlayer = Players.LocalPlayer
 
 local Window = Rayfield:CreateWindow({
 	Name = "Chop Your Tree | Hub",
 	LoadingTitle = "Chop Your Tree Automation",
-	LoadingSubtitle = "Event Currency, Watering Cans, Purifier & Player",
+	LoadingSubtitle = "Automation, Cans, Purifier, Equipper & Player",
 	ConfigurationSaving = {
 		Enabled = true,
 		FolderName = "ChopYourTree_Rayfield",
@@ -23,7 +25,7 @@ local Window = Rayfield:CreateWindow({
 	KeySystem = false
 })
 
-local EventTab = Window:CreateTab("Event Farm", 4483362458)
+local AutoTab = Window:CreateTab("Automation", 4483362458)
 local CanTab = Window:CreateTab("Watering Cans", 4483362458)
 local PurifierTab = Window:CreateTab("Water Purifier", 4483362458)
 local EquipTab = Window:CreateTab("Can Equipper", 4483362458)
@@ -32,42 +34,45 @@ local PlayerTab = Window:CreateTab("Player", 4483362458)
 local State = {
 	Running = true,
 
-	-- Event Farm & Tapping State
-	AutoCollect = false,
-	Mode = "TouchInterest (Silent / No TP)",
-	ScanInterval = 0.25,
-	TeleportDelay = 0.08,
-	ReturnToStart = true,
+	-- Automation & Event Farm State
 	AutoTapTree = false,
-	TapInterval = 0.08,
-
-	-- Watering Can Auto-Pickup State
+	TapInterval = 0.01,
 	AutoPickupCans = false,
+	AutoPurify = false,
+	AutoCollectCoins = false,
+	CollectMode = "TouchInterest",
+	ScanInterval = 0.1,
+	TeleportDelay = 0.01,
+	ReturnToStart = true,
+
+	-- Watering Cans Config (Fixed / Hidden UI)
 	MinXpInput = "50SXT",
-	CanScanInterval = 0.5,
-	PickupCooldown = 0.15,
+	CanScanInterval = 0.1,
+	PickupCooldown = 0.1,
 	MoveIntoRange = true,
 	ReturnAfterMove = true,
 
-	-- Water Purifier State
-	AutoPurify = false,
-	PurifyCycleInterval = 0.2,
+	-- Water Purifier Config (Fixed / Hidden UI)
+	PurifyCycleInterval = 0.1,
 	EquipDelay = 0,
-	ClaimPollInterval = 0.35,
-	MaxPurifyWait = 60,
+	ClaimPollInterval = 0.1,
+	MaxPurifyWait = 15,
 	PrioritizeLowestXp = true,
 	MaxPurifyXpInput = "",
 
-	-- Can Equipper State
+	-- Can Equipper Config (Fixed / Hidden UI)
 	AutoHoldHighestXp = false,
 	AutoHoldLowestXp = false,
-	AutoEquipInterval = 0.5,
+	AutoEquipInterval = 0.1,
 
 	-- Player Utility State
 	AutoPrestige = false,
 	PrestigeInterval = 5,
 	SpeedHack = false,
-	SpeedAmount = 60
+	SpeedAmount = 60,
+	NoClip = false,
+	InfiniteJump = false,
+	InstantPrompts = false
 }
 
 local MAX_CAN_RANGE = 32
@@ -80,6 +85,7 @@ local PurifiedRegistry = {
 
 local Threads = {}
 local Connections = {}
+local SavedPromptHoldDurations = {}
 
 local function trackThread(name: string, fn: () -> ())
 	if Threads[name] then
@@ -91,7 +97,7 @@ end
 
 local function trackConnection(name: string, conn: RBXScriptConnection)
 	if Connections[name] then
-		pcall(function() Connections[name]:Disconnect() end)
+		pcall(function() conn:Disconnect() end)
 	end
 	Connections[name] = conn
 	return conn
@@ -114,6 +120,44 @@ local function setWalkSpeed(speed: number)
 		pcall(function()
 			hum.WalkSpeed = speed
 		end)
+	end
+end
+
+local function applyNoClipStep()
+	local char = LocalPlayer.Character
+	if not char then return end
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CanCollide = false
+		end
+	end
+end
+
+local function applyInstantPrompt(prompt: ProximityPrompt)
+	if SavedPromptHoldDurations[prompt] == nil then
+		SavedPromptHoldDurations[prompt] = prompt.HoldDuration
+	end
+	pcall(function()
+		prompt.HoldDuration = 0
+	end)
+end
+
+local function setInstantPromptsEnabled(enabled: boolean)
+	if enabled then
+		for _, desc in ipairs(Workspace:GetDescendants()) do
+			if desc:IsA("ProximityPrompt") then
+				applyInstantPrompt(desc)
+			end
+		end
+	else
+		for prompt, origDuration in pairs(SavedPromptHoldDurations) do
+			if prompt and prompt.Parent then
+				pcall(function()
+					prompt.HoldDuration = origDuration
+				end)
+			end
+		end
+		table.clear(SavedPromptHoldDurations)
 	end
 end
 
@@ -287,7 +331,7 @@ local function unequipCurrentTool()
 end
 
 -- ==========================================
--- TAB 1: EVENT CURRENCY COLLECTOR & TREE TAP
+-- HIDDEN EVENT CURRENCY & TREE TAP LOGIC
 -- ==========================================
 local function getCoinHitbox(obj: Instance): BasePart?
 	if obj.Name == "EventCurrency" then
@@ -311,44 +355,22 @@ local function collectSingleCoin(hitbox: BasePart)
 	local hrp = getRootPart()
 	if not (hrp and hitbox and hitbox.Parent) then return end
 
-	if State.Mode == "TouchInterest (Silent / No TP)" and typeof(firetouchinterest) == "function" then
+	if typeof(firetouchinterest) == "function" then
 		pcall(function()
 			firetouchinterest(hrp, hitbox, 0)
 			task.wait()
 			firetouchinterest(hrp, hitbox, 1)
 		end)
-	else
-		hrp.CFrame = hitbox.CFrame + Vector3.new(0, 2, 0)
-		if typeof(firetouchinterest) == "function" then
-			pcall(function()
-				firetouchinterest(hrp, hitbox, 0)
-				firetouchinterest(hrp, hitbox, 1)
-			end)
-		end
-		task.wait(State.TeleportDelay)
 	end
 end
 
 local function collectAllExistingCoins()
-	local hrp = getRootPart()
-	if not hrp then return end
-
-	local savedCFrame = hrp.CFrame
-	local collectedAny = false
-
+	if not State.Running or not State.AutoCollectCoins then return end
 	for _, child in ipairs(Workspace:GetChildren()) do
-		if not State.Running or not State.AutoCollect then break end
+		if not State.Running or not State.AutoCollectCoins then break end
 		local hb = getCoinHitbox(child)
 		if hb then
 			collectSingleCoin(hb)
-			collectedAny = true
-		end
-	end
-
-	if collectedAny and State.Mode == "Teleport to Coin" and State.ReturnToStart then
-		local currentHrp = getRootPart()
-		if currentHrp then
-			currentHrp.CFrame = savedCFrame
 		end
 	end
 end
@@ -385,99 +407,18 @@ local function stepAutoTapTree()
 end
 
 trackConnection("EventCoinAdded", Workspace.ChildAdded:Connect(function(child)
-	if not State.Running or not State.AutoCollect then return end
+	if not State.Running or not State.AutoCollectCoins then return end
 	if child.Name == "EventCurrency" then
-		task.wait(0.05)
+		task.wait(0.02)
 		local hb = getCoinHitbox(child)
 		if hb then
-			if State.Mode == "TouchInterest (Silent / No TP)" then
-				collectSingleCoin(hb)
-			else
-				collectAllExistingCoins()
-			end
+			collectSingleCoin(hb)
 		end
 	end
 end))
 
-EventTab:CreateSection("Event Currency Collector")
-
-EventTab:CreateDropdown({
-	Name = "Collection Method",
-	Options = {
-		"TouchInterest (Silent / No TP)",
-		"Teleport to Coin"
-	},
-	CurrentOption = {State.Mode},
-	MultipleOptions = false,
-	Flag = "CollectModeDropdown",
-	Callback = function(Options)
-		State.Mode = Options[1]
-	end
-})
-
-EventTab:CreateToggle({
-	Name = "Return to Original Spot (Teleport Mode)",
-	CurrentValue = true,
-	Flag = "ReturnSpotToggle",
-	Callback = function(Value)
-		State.ReturnToStart = Value
-	end
-})
-
-EventTab:CreateSlider({
-	Name = "Teleport Step Delay (Seconds)",
-	Range = {0.03, 0.5},
-	Increment = 0.01,
-	Suffix = "s",
-	CurrentValue = State.TeleportDelay,
-	Flag = "TpDelaySlider",
-	Callback = function(Value)
-		State.TeleportDelay = Value
-	end
-})
-
-EventTab:CreateToggle({
-	Name = "Auto-Collect Event Currency (AFK)",
-	CurrentValue = false,
-	Flag = "AutoCollectEventToggle",
-	Callback = function(Value)
-		State.AutoCollect = Value
-		if Value then
-			Rayfield:Notify({
-				Title = "Event Collector Active",
-				Content = "Watching Workspace.EventCurrency (" .. State.Mode .. ")",
-				Duration = 3
-			})
-			task.spawn(collectAllExistingCoins)
-		end
-	end
-})
-
-EventTab:CreateSection("Tree Tapping")
-
-EventTab:CreateSlider({
-	Name = "Auto-Tap Interval (Seconds)",
-	Range = {0.02, 0.5},
-	Increment = 0.01,
-	Suffix = "s",
-	CurrentValue = State.TapInterval,
-	Flag = "AutoTapIntervalSlider",
-	Callback = function(Value)
-		State.TapInterval = Value
-	end
-})
-
-EventTab:CreateToggle({
-	Name = "Auto-Tap Tree",
-	CurrentValue = false,
-	Flag = "AutoTapTreeToggle",
-	Callback = function(Value)
-		State.AutoTapTree = Value
-	end
-})
-
 -- ==========================================
--- TAB 2: WATERING CAN AUTO-PICKUP (PRESERVED)
+-- WATERING CAN AUTO-PICKUP LOGIC
 -- ==========================================
 local function getHorizontalDistance(partA: BasePart, partB: BasePart): number
 	local vecA = Vector3.new(partA.Position.X, 0, partA.Position.Z)
@@ -514,7 +455,7 @@ local function triggerWateringCanPickup(canModel: Model): boolean
 			savedCFrame = hrp.CFrame
 			hrp.CFrame = hitBox.CFrame + Vector3.new(0, 2.5, 0)
 			moved = true
-			task.wait(0.05)
+			task.wait(0.02)
 		end
 	end
 
@@ -523,7 +464,7 @@ local function triggerWateringCanPickup(canModel: Model): boolean
 	local ok = pcall(function()
 		remote:FireServer(canModel)
 	end)
-	task.wait(0.1)
+	task.wait(0.05)
 	_G.TapButtonClicked = prevFlag
 
 	if moved and savedCFrame and State.ReturnAfterMove then
@@ -567,90 +508,8 @@ local function stepWateringCanPickup()
 	end
 end
 
-CanTab:CreateSection("XP Threshold Whitelist")
-
-CanTab:CreateInput({
-	Name = "Minimum XP to Pick Up (e.g. 50SXT, 200SXT, 1SP)",
-	PlaceholderText = "50SXT",
-	RemoveTextAfterFocusLost = false,
-	Flag = "MinCanXpInput",
-	Callback = function(Text)
-		if Text ~= "" then
-			State.MinXpInput = Text
-			if not parseSuffixedNumber(Text) then
-				Rayfield:Notify({
-					Title = "Invalid XP Format",
-					Content = "Use formats like 50SXT, 250SXT, 1SP, 500B",
-					Duration = 3
-				})
-			end
-		end
-	end
-})
-
-CanTab:CreateToggle({
-	Name = "Move Into Range if >32 Studs",
-	CurrentValue = true,
-	Flag = "MoveCanIntoRangeToggle",
-	Callback = function(Value)
-		State.MoveIntoRange = Value
-	end
-})
-
-CanTab:CreateToggle({
-	Name = "Return After Moving Into Range",
-	CurrentValue = true,
-	Flag = "ReturnAfterCanMoveToggle",
-	Callback = function(Value)
-		State.ReturnAfterMove = Value
-	end
-})
-
-CanTab:CreateSlider({
-	Name = "Pickup Cooldown (Seconds)",
-	Range = {0.1, 1.5},
-	Increment = 0.05,
-	Suffix = "s",
-	CurrentValue = State.PickupCooldown,
-	Flag = "CanConfirmDelaySlider",
-	Callback = function(Value)
-		State.PickupCooldown = Value
-	end
-})
-
-CanTab:CreateSlider({
-	Name = "Pickup Cycle Interval (Seconds)",
-	Range = {0.25, 3.0},
-	Increment = 0.05,
-	Suffix = "s",
-	CurrentValue = State.CanScanInterval,
-	Flag = "CanScanIntervalSlider",
-	Callback = function(Value)
-		State.CanScanInterval = Value
-	end
-})
-
-CanTab:CreateSection("Automation Toggle")
-
-CanTab:CreateToggle({
-	Name = "Auto-Pick Up Cans Above Minimum XP",
-	CurrentValue = false,
-	Flag = "AutoPickupCansToggle",
-	Callback = function(Value)
-		State.AutoPickupCans = Value
-		if Value then
-			Rayfield:Notify({
-				Title = "Watering Can Auto-Pickup Active",
-				Content = "Picking up cans >= " .. State.MinXpInput .. " XP",
-				Duration = 3
-			})
-			task.spawn(stepWateringCanPickup)
-		end
-	end
-})
-
 -- ==========================================
--- TAB 3: WATER PURIFIER AUTOMATION (PRESERVED)
+-- WATER PURIFIER AUTOMATION LOGIC
 -- ==========================================
 local function findPurifierRemote(name: string): RemoteFunction?
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -810,7 +669,7 @@ local function stepWaterPurifier()
 
 		markPurified(tool)
 
-		task.wait(0.05)
+		task.wait(0.02)
 		unequipCurrentTool()
 
 		local backpack = LocalPlayer:FindFirstChild("Backpack")
@@ -866,127 +725,8 @@ local function stepWaterPurifier()
 	end
 end
 
-PurifierTab:CreateSection("Fast Selection & Filtering")
-
-PurifierTab:CreateToggle({
-	Name = "Prioritize Lowest XP Cans First (Fast Unpurified)",
-	CurrentValue = true,
-	Flag = "PrioritizeLowestXpToggle",
-	Callback = function(Value)
-		State.PrioritizeLowestXp = Value
-	end
-})
-
-PurifierTab:CreateInput({
-	Name = "Max XP Filter (Optional, e.g. 500SXT — Blank = All)",
-	PlaceholderText = "Leave blank for no cap",
-	RemoveTextAfterFocusLost = false,
-	Flag = "MaxPurifyXpInput",
-	Callback = function(Text)
-		State.MaxPurifyXpInput = Text
-	end
-})
-
-PurifierTab:CreateSection("Purifier Timing")
-
-PurifierTab:CreateSlider({
-	Name = "Equip Wait Delay (Seconds)",
-	Range = {0, 1.5},
-	Increment = 0.05,
-	Suffix = "s",
-	CurrentValue = State.EquipDelay,
-	Flag = "PurifyEquipDelaySlider",
-	Callback = function(Value)
-		State.EquipDelay = Value
-	end
-})
-
-PurifierTab:CreateSlider({
-	Name = "Claim Check Interval (Seconds)",
-	Range = {0.2, 2.0},
-	Increment = 0.05,
-	Suffix = "s",
-	CurrentValue = State.ClaimPollInterval,
-	Flag = "PurifyClaimPollSlider",
-	Callback = function(Value)
-		State.ClaimPollInterval = Value
-	end
-})
-
-PurifierTab:CreateSlider({
-	Name = "Max Timer Wait (Seconds)",
-	Range = {10, 180},
-	Increment = 5,
-	Suffix = "s",
-	CurrentValue = State.MaxPurifyWait,
-	Flag = "PurifyMaxWaitSlider",
-	Callback = function(Value)
-		State.MaxPurifyWait = Value
-	end
-})
-
-PurifierTab:CreateSlider({
-	Name = "Cycle Interval Between Cans (Seconds)",
-	Range = {0.1, 5.0},
-	Increment = 0.1,
-	Suffix = "s",
-	CurrentValue = State.PurifyCycleInterval,
-	Flag = "PurifyCycleIntervalSlider",
-	Callback = function(Value)
-		State.PurifyCycleInterval = Value
-	end
-})
-
-PurifierTab:CreateButton({
-	Name = "Mark Held Can as Purified (Skip)",
-	Callback = function()
-		local char = LocalPlayer.Character
-		local heldTool = char and char:FindFirstChildWhichIsA("Tool")
-		if heldTool then
-			markPurified(heldTool)
-			Rayfield:Notify({
-				Title = "Marked as Purified",
-				Content = "Will skip '" .. heldTool.Name .. "'",
-				Duration = 2.5
-			})
-		end
-	end
-})
-
-PurifierTab:CreateButton({
-	Name = "Reset Purified Can Memory",
-	Callback = function()
-		table.clear(PurifiedRegistry.ByInstance)
-		table.clear(PurifiedRegistry.ByName)
-		Rayfield:Notify({
-			Title = "Purifier Memory Cleared",
-			Content = "Cleared session history of purified cans.",
-			Duration = 3
-		})
-	end
-})
-
-PurifierTab:CreateSection("Automation Toggle")
-
-PurifierTab:CreateToggle({
-	Name = "Auto-Purify Watering Cans (Loop)",
-	CurrentValue = false,
-	Flag = "AutoPurifyCansToggle",
-	Callback = function(Value)
-		State.AutoPurify = Value
-		if Value then
-			Rayfield:Notify({
-				Title = "Water Purifier Active",
-				Content = "Waiting for timer & claim before searching for next can.",
-				Duration = 3
-			})
-			task.spawn(stepWaterPurifier)
-		end
-	end
-})
-
 -- ==========================================
--- TAB 4: CAN EQUIPPER (PRESERVED)
+-- CAN EQUIPPER LOGIC
 -- ==========================================
 local function findExtremeXpCan(mode: "HIGHEST" | "LOWEST"): (Tool?, number?)
 	local chosenTool: Tool? = nil
@@ -1046,6 +786,127 @@ local function equipExtremeCan(mode: "HIGHEST" | "LOWEST", notify: boolean): boo
 	return ok
 end
 
+-- ==========================================
+-- TAB 1: AUTOMATION
+-- ==========================================
+AutoTab:CreateSection("Core Automation")
+
+AutoTab:CreateToggle({
+	Name = "Auto-Tap Tree",
+	CurrentValue = false,
+	Flag = "AutoTapTreeToggle",
+	Callback = function(Value)
+		State.AutoTapTree = Value
+	end
+})
+
+AutoTab:CreateToggle({
+	Name = "Auto-Pick Up Watering Cans",
+	CurrentValue = false,
+	Flag = "AutoPickupCansToggle",
+	Callback = function(Value)
+		State.AutoPickupCans = Value
+		if Value then
+			task.spawn(stepWateringCanPickup)
+		end
+	end
+})
+
+AutoTab:CreateToggle({
+	Name = "Auto-Purify Watering Cans",
+	CurrentValue = false,
+	Flag = "AutoPurifyCansToggle",
+	Callback = function(Value)
+		State.AutoPurify = Value
+		if Value then
+			task.spawn(stepWaterPurifier)
+		end
+	end
+})
+
+AutoTab:CreateToggle({
+	Name = "Auto-Collect Asgard Coin",
+	CurrentValue = false,
+	Flag = "AutoCollectAsgardCoinToggle",
+	Callback = function(Value)
+		State.AutoCollectCoins = Value
+		if Value then
+			task.spawn(collectAllExistingCoins)
+		end
+	end
+})
+
+-- ==========================================
+-- TAB 2: WATERING CANS
+-- ==========================================
+CanTab:CreateSection("XP Filter")
+
+CanTab:CreateInput({
+	Name = "Minimum XP to Pick Up",
+	PlaceholderText = "50SXT",
+	RemoveTextAfterFocusLost = false,
+	Flag = "MinCanXpInput",
+	Callback = function(Text)
+		if Text ~= "" then
+			State.MinXpInput = Text
+			if not parseSuffixedNumber(Text) then
+				Rayfield:Notify({
+					Title = "Invalid XP Format",
+					Content = "Use formats like 50SXT, 250SXT, 1SP, 500B",
+					Duration = 3
+				})
+			end
+		end
+	end
+})
+
+-- ==========================================
+-- TAB 3: WATER PURIFIER
+-- ==========================================
+PurifierTab:CreateSection("Filter & Memory")
+
+PurifierTab:CreateInput({
+	Name = "Max XP Filter",
+	PlaceholderText = "Leave blank for no cap",
+	RemoveTextAfterFocusLost = false,
+	Flag = "MaxPurifyXpInput",
+	Callback = function(Text)
+		State.MaxPurifyXpInput = Text
+	end
+})
+
+PurifierTab:CreateButton({
+	Name = "Mark Held Can as Purified",
+	Callback = function()
+		local char = LocalPlayer.Character
+		local heldTool = char and char:FindFirstChildWhichIsA("Tool")
+		if heldTool then
+			markPurified(heldTool)
+			Rayfield:Notify({
+				Title = "Marked as Purified",
+				Content = "Will skip '" .. heldTool.Name .. "'",
+				Duration = 2.5
+			})
+		end
+	end
+})
+
+PurifierTab:CreateButton({
+	Name = "Reset Purified Can Memory",
+	Callback = function()
+		table.clear(PurifiedRegistry.ByInstance)
+		table.clear(PurifiedRegistry.ByName)
+		Rayfield:Notify({
+			Title = "Purifier Memory Cleared",
+			Content = "Cleared session history of purified cans.",
+			Duration = 3
+		})
+	end
+})
+
+-- ==========================================
+-- TAB 4: CAN EQUIPPER
+-- ==========================================
 EquipTab:CreateSection("Instant Hold by XP")
 
 EquipTab:CreateButton({
@@ -1098,7 +959,7 @@ AutoHoldHighestToggle = EquipTab:CreateToggle({
 })
 
 AutoHoldLowestToggle = EquipTab:CreateToggle({
-	Name = "Auto-Hold Lowest XP Can (Great for Trading)",
+	Name = "Auto-Hold Lowest XP Can",
 	CurrentValue = false,
 	Flag = "AutoHoldLowestXpToggle",
 	Callback = function(Value)
@@ -1115,20 +976,8 @@ AutoHoldLowestToggle = EquipTab:CreateToggle({
 	end
 })
 
-EquipTab:CreateSlider({
-	Name = "Auto-Hold Check Interval (Seconds)",
-	Range = {0.1, 3.0},
-	Increment = 0.05,
-	Suffix = "s",
-	CurrentValue = State.AutoEquipInterval,
-	Flag = "AutoEquipIntervalSlider",
-	Callback = function(Value)
-		State.AutoEquipInterval = Value
-	end
-})
-
 -- ==========================================
--- TAB 5: PLAYER STATS, PRESTIGE & MOVEMENT
+-- TAB 5: PLAYER
 -- ==========================================
 local function triggerPrestigeOnce()
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -1215,7 +1064,7 @@ PlayerTab:CreateToggle({
 	end
 })
 
-PlayerTab:CreateSection("Movement")
+PlayerTab:CreateSection("Movement & World")
 
 PlayerTab:CreateSlider({
 	Name = "WalkSpeed",
@@ -1246,12 +1095,40 @@ PlayerTab:CreateToggle({
 	end
 })
 
+PlayerTab:CreateToggle({
+	Name = "No Clip",
+	CurrentValue = false,
+	Flag = "NoClipToggle",
+	Callback = function(Value)
+		State.NoClip = Value
+	end
+})
+
+PlayerTab:CreateToggle({
+	Name = "Infinite Jump",
+	CurrentValue = false,
+	Flag = "InfiniteJumpToggle",
+	Callback = function(Value)
+		State.InfiniteJump = Value
+	end
+})
+
+PlayerTab:CreateToggle({
+	Name = "Instant Proximity Prompts",
+	CurrentValue = false,
+	Flag = "InstantPromptsToggle",
+	Callback = function(Value)
+		State.InstantPrompts = Value
+		setInstantPromptsEnabled(Value)
+	end
+})
+
 -- ==========================================
 -- CLEANUP & BACKGROUND LOOPS
 -- ==========================================
 local function unloadHub()
 	State.Running = false
-	State.AutoCollect = false
+	State.AutoCollectCoins = false
 	State.AutoTapTree = false
 	State.AutoPickupCans = false
 	State.AutoPurify = false
@@ -1259,8 +1136,12 @@ local function unloadHub()
 	State.AutoHoldLowestXp = false
 	State.AutoPrestige = false
 	State.SpeedHack = false
+	State.NoClip = false
+	State.InfiniteJump = false
+	State.InstantPrompts = false
 	PurifierBusy = false
 
+	setInstantPromptsEnabled(false)
 	setWalkSpeed(DEFAULT_WALKSPEED)
 
 	for name, thread in pairs(Threads) do
@@ -1281,15 +1162,35 @@ getgenv().ChopYourTreeHub = {
 	Unload = unloadHub
 }
 
-trackConnection("SpeedHeartbeat", RunService.Heartbeat:Connect(function()
-	if State.Running and State.SpeedHack then
+trackConnection("SteppedLoop", RunService.Stepped:Connect(function()
+	if not State.Running then return end
+	if State.NoClip then
+		applyNoClipStep()
+	end
+	if State.SpeedHack then
 		setWalkSpeed(State.SpeedAmount)
+	end
+end))
+
+trackConnection("JumpRequestConn", UserInputService.JumpRequest:Connect(function()
+	if not State.Running or not State.InfiniteJump then return end
+	local hum = getHumanoid()
+	if hum then
+		pcall(function()
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end)
+	end
+end))
+
+trackConnection("PromptShownConn", ProximityPromptService.PromptShown:Connect(function(prompt)
+	if State.Running and State.InstantPrompts and prompt then
+		applyInstantPrompt(prompt)
 	end
 end))
 
 trackThread("EventCollectorLoop", function()
 	while State.Running do
-		if State.AutoCollect then
+		if State.AutoCollectCoins then
 			pcall(collectAllExistingCoins)
 		end
 		task.wait(State.ScanInterval)
