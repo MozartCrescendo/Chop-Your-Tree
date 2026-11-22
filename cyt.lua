@@ -55,7 +55,7 @@ local State = {
 	-- Water Purifier Config (Fixed / Hidden UI)
 	PurifyCycleInterval = 0.1,
 	EquipDelay = 0,
-	ClaimPollInterval = 0.1,
+	ClaimPollInterval = 0.25,
 	MaxPurifyWait = 15,
 	PrioritizeLowestXp = true,
 	MaxPurifyXpInput = "",
@@ -233,16 +233,24 @@ end
 local function isWateringCanTool(tool: Instance): boolean
 	if not tool:IsA("Tool") then return false end
 	local lower = string.lower(tool.Name)
-	if string.find(lower, "axe", 1, true) then
+
+	-- Exclude non-can tools such as axes and totems
+	if string.find(lower, "axe", 1, true)
+		or string.find(lower, "totem", 1, true)
+	then
 		return false
 	end
-	if string.find(lower, "xp", 1, true)
+
+	-- Watering cans in Chop Your Tree carry WateringCanId or "xp" / "can" / "water"
+	if tool:GetAttribute("WateringCanId") ~= nil
+		or tool:GetAttribute("WateringCan") ~= nil
+		or string.find(lower, "xp", 1, true)
 		or string.find(lower, "can", 1, true)
 		or string.find(lower, "water", 1, true)
-		or tool:GetAttribute("WateringCan") ~= nil
 	then
 		return true
 	end
+
 	return false
 end
 
@@ -645,6 +653,7 @@ local function tryClaimPurifiedCan(): boolean
 end
 
 local function stepWaterPurifier()
+	-- Strictly locked while a can is in the machine or a cycle is active
 	if PurifierBusy or not State.Running then
 		return
 	end
@@ -667,8 +676,10 @@ local function stepWaterPurifier()
 			return
 		end
 
+		-- Mark ONLY the can placed into the machine
 		markPurified(tool)
 
+		-- Must hold nothing after starting purification
 		task.wait(0.02)
 		unequipCurrentTool()
 
@@ -685,6 +696,7 @@ local function stepWaterPurifier()
 			end)
 		end
 
+		-- Wait for the full Max Timer Wait window without scanning or marking other cans
 		local elapsed = 0
 		while State.Running and State.AutoPurify and elapsed < State.MaxPurifyWait do
 			local stepWait = math.min(State.ClaimPollInterval, State.MaxPurifyWait - elapsed)
@@ -818,7 +830,7 @@ AutoTab:CreateToggle({
 	Flag = "AutoPurifyCansToggle",
 	Callback = function(Value)
 		State.AutoPurify = Value
-		if Value then
+		if Value and not PurifierBusy then
 			task.spawn(stepWaterPurifier)
 		end
 	end
