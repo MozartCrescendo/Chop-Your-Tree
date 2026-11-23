@@ -11,12 +11,14 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
 local LocalPlayer = Players.LocalPlayer
 
 local Window = Rayfield:CreateWindow({
 	Name = "Chop Your Tree | Hub",
 	LoadingTitle = "Chop Your Tree Automation",
-	LoadingSubtitle = "Automation, Cans, Purifier, Equipper & Player",
+	LoadingSubtitle = "Automation, Cans, Purifier, Equipper, Crates & Player",
 	ConfigurationSaving = {
 		Enabled = true,
 		FolderName = "ChopYourTree_Rayfield",
@@ -29,6 +31,7 @@ local AutoTab = Window:CreateTab("Automation", 4483362458)
 local CanTab = Window:CreateTab("Watering Cans", 4483362458)
 local PurifierTab = Window:CreateTab("Water Purifier", 4483362458)
 local EquipTab = Window:CreateTab("Can Equipper", 4483362458)
+local CrateTab = Window:CreateTab("Crates", 4483362458)
 local PlayerTab = Window:CreateTab("Player", 4483362458)
 
 local State = {
@@ -64,6 +67,10 @@ local State = {
 	AutoHoldHighestXp = false,
 	AutoHoldLowestXp = false,
 	AutoEquipInterval = 0.1,
+
+	-- Auto Buy Crates State
+	AutoAxeCrate = false,
+	AutoTotemCrate = false,
 
 	-- Player Utility State
 	AutoPrestige = false,
@@ -234,14 +241,12 @@ local function isWateringCanTool(tool: Instance): boolean
 	if not tool:IsA("Tool") then return false end
 	local lower = string.lower(tool.Name)
 
-	-- Exclude non-can tools such as axes and totems
 	if string.find(lower, "axe", 1, true)
 		or string.find(lower, "totem", 1, true)
 	then
 		return false
 	end
 
-	-- Watering cans in Chop Your Tree carry WateringCanId or "xp" / "can" / "water"
 	if tool:GetAttribute("WateringCanId") ~= nil
 		or tool:GetAttribute("WateringCan") ~= nil
 		or string.find(lower, "xp", 1, true)
@@ -653,7 +658,6 @@ local function tryClaimPurifiedCan(): boolean
 end
 
 local function stepWaterPurifier()
-	-- Strictly locked while a can is in the machine or a cycle is active
 	if PurifierBusy or not State.Running then
 		return
 	end
@@ -676,10 +680,8 @@ local function stepWaterPurifier()
 			return
 		end
 
-		-- Mark ONLY the can placed into the machine
 		markPurified(tool)
 
-		-- Must hold nothing after starting purification
 		task.wait(0.02)
 		unequipCurrentTool()
 
@@ -696,7 +698,6 @@ local function stepWaterPurifier()
 			end)
 		end
 
-		-- Wait for the full Max Timer Wait window without scanning or marking other cans
 		local elapsed = 0
 		while State.Running and State.AutoPurify and elapsed < State.MaxPurifyWait do
 			local stepWait = math.min(State.ClaimPollInterval, State.MaxPurifyWait - elapsed)
@@ -796,6 +797,128 @@ local function equipExtremeCan(mode: "HIGHEST" | "LOWEST", notify: boolean): boo
 		})
 	end
 	return ok
+end
+
+-- ==========================================
+-- AUTO BUY & FAST UNBOX CRATES LOGIC
+-- ==========================================
+local function getCrateTarget(crateType: "Axe" | "Totem"): (BasePart?, ProximityPrompt?)
+	local cratesFolder = Workspace:FindFirstChild("Crates")
+	local typeFolder = cratesFolder and cratesFolder:FindFirstChild(crateType)
+	local crateInst = typeFolder and typeFolder:FindFirstChild("Crate")
+	if not crateInst then return nil, nil end
+
+	local prompt = crateInst:FindFirstChildWhichIsA("ProximityPrompt", true)
+	local part: BasePart? = nil
+	if crateInst:IsA("BasePart") then
+		part = crateInst
+	elseif crateInst:IsA("Model") then
+		part = crateInst.PrimaryPart or crateInst:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return part, prompt
+end
+
+local function triggerCratePrompt(crateType: "Axe" | "Totem"): boolean
+	local part, prompt = getCrateTarget(crateType)
+	local hrp = getRootPart()
+	if not prompt then return false end
+
+	if part and hrp and (part.Position - hrp.Position).Magnitude > 20 then
+		pcall(function()
+			hrp.CFrame = part.CFrame + Vector3.new(0, 2.5, 0)
+		end)
+		task.wait(0.02)
+	end
+
+	if typeof(fireproximityprompt) == "function" then
+		pcall(function()
+			fireproximityprompt(prompt)
+		end)
+		return true
+	end
+
+	local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local promptGui = pGui and pGui:FindFirstChild("ProximityPrompts")
+	local promptBtn = promptGui and promptGui:FindFirstChild("TextButton", true)
+	if promptBtn and promptBtn:IsA("GuiButton") and typeof(firesignal) == "function" then
+		pcall(function()
+			firesignal(promptBtn.Activated)
+			firesignal(promptBtn.MouseButton1Click)
+		end)
+		return true
+	end
+
+	return false
+end
+
+local function clickBuy3Button(): boolean
+	local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local cratePromptGui = pGui and pGui:FindFirstChild("CratePrompt")
+	local buy3Btn = cratePromptGui and cratePromptGui:FindFirstChild("Buy3", true)
+	if buy3Btn and buy3Btn:IsA("GuiButton") then
+		if typeof(firesignal) == "function" then
+			pcall(function()
+				firesignal(buy3Btn.Activated)
+				firesignal(buy3Btn.MouseButton1Click)
+			end)
+			return true
+		end
+	end
+	return false
+end
+
+local function burstTapUnbox(durationSeconds: number)
+	local deadline = os.clock() + durationSeconds
+	local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local camera = Workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	local centerX = viewport.X * 0.5
+	local centerY = viewport.Y * 0.5
+
+	while State.Running and (State.AutoAxeCrate or State.AutoTotemCrate) and os.clock() < deadline do
+		-- Fire signals on any visible unbox/crate buttons in PlayerGui
+		if pGui and typeof(firesignal) == "function" then
+			for _, gui in ipairs(pGui:GetChildren()) do
+				if gui.Name ~= "Rayfield" and gui.Name ~= "ProximityPrompts" and gui.Name ~= "CratePrompt" then
+					for _, desc in ipairs(gui:GetDescendants()) do
+						if (desc:IsA("TextButton") or desc:IsA("ImageButton")) and desc.Visible and desc.Active then
+							local nLower = string.lower(desc.Name)
+							if nLower ~= "x" and nLower ~= "close" and nLower ~= "autodelete" then
+								pcall(function()
+									firesignal(desc.Activated)
+									firesignal(desc.MouseButton1Click)
+								end)
+							end
+						end
+					end
+				end
+			end
+		end
+
+		-- Fast virtual tap/click burst across screen center
+		if VirtualInputManager then
+			pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 1)
+				VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 1)
+			end)
+		end
+
+		task.wait(0.01)
+	end
+end
+
+local function stepAutoCrate(crateType: "Axe" | "Totem")
+	local isActive = function()
+		if not State.Running then return false end
+		return crateType == "Axe" and State.AutoAxeCrate or State.AutoTotemCrate
+	end
+
+	if not isActive() then return end
+
+	triggerCratePrompt(crateType)
+	task.wait(0.04)
+	clickBuy3Button()
+	burstTapUnbox(0.65)
 end
 
 -- ==========================================
@@ -989,7 +1112,45 @@ AutoHoldLowestToggle = EquipTab:CreateToggle({
 })
 
 -- ==========================================
--- TAB 5: PLAYER
+-- TAB 5: CRATES
+-- ==========================================
+CrateTab:CreateSection("Auto Buy & Fast Open (Buy 3)")
+
+local AxeCrateToggle
+local TotemCrateToggle
+
+AxeCrateToggle = CrateTab:CreateToggle({
+	Name = "Axe Crate",
+	CurrentValue = false,
+	Flag = "AutoAxeCrateToggle",
+	Callback = function(Value)
+		State.AutoAxeCrate = Value
+		if Value and State.AutoTotemCrate then
+			State.AutoTotemCrate = false
+			if TotemCrateToggle then
+				TotemCrateToggle:Set(false)
+			end
+		end
+	end
+})
+
+TotemCrateToggle = CrateTab:CreateToggle({
+	Name = "Totem Crate",
+	CurrentValue = false,
+	Flag = "AutoTotemCrateToggle",
+	Callback = function(Value)
+		State.AutoTotemCrate = Value
+		if Value and State.AutoAxeCrate then
+			State.AutoAxeCrate = false
+			if AxeCrateToggle then
+				AxeCrateToggle:Set(false)
+			end
+		end
+	end
+})
+
+-- ==========================================
+-- TAB 6: PLAYER
 -- ==========================================
 local function triggerPrestigeOnce()
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -1146,6 +1307,8 @@ local function unloadHub()
 	State.AutoPurify = false
 	State.AutoHoldHighestXp = false
 	State.AutoHoldLowestXp = false
+	State.AutoAxeCrate = false
+	State.AutoTotemCrate = false
 	State.AutoPrestige = false
 	State.SpeedHack = false
 	State.NoClip = false
@@ -1244,6 +1407,17 @@ trackThread("EquipperLoop", function()
 			pcall(equipExtremeCan, "LOWEST", false)
 		end
 		task.wait(State.AutoEquipInterval)
+	end
+end)
+
+trackThread("CrateLoop", function()
+	while State.Running do
+		if State.AutoAxeCrate then
+			pcall(stepAutoCrate, "Axe")
+		elseif State.AutoTotemCrate then
+			pcall(stepAutoCrate, "Totem")
+		end
+		task.wait(0.05)
 	end
 end)
 
