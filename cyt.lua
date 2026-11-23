@@ -12,7 +12,6 @@ local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
-local GuiService = game:GetService("GuiService")
 local LocalPlayer = Players.LocalPlayer
 
 local Window = Rayfield:CreateWindow({
@@ -827,7 +826,7 @@ local function triggerCratePrompt(crateType: "Axe" | "Totem"): boolean
 		pcall(function()
 			hrp.CFrame = part.CFrame + Vector3.new(0, 2.5, 0)
 		end)
-		task.wait(0.02)
+		task.wait(0.03)
 	end
 
 	if typeof(fireproximityprompt) == "function" then
@@ -851,59 +850,58 @@ local function triggerCratePrompt(crateType: "Axe" | "Totem"): boolean
 	return false
 end
 
-local function clickBuy3Button(): boolean
+local function waitForCratePromptAndBuy3(timeoutSeconds: number): boolean
 	local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-	local cratePromptGui = pGui and pGui:FindFirstChild("CratePrompt")
-	local buy3Btn = cratePromptGui and cratePromptGui:FindFirstChild("Buy3", true)
-	if buy3Btn and buy3Btn:IsA("GuiButton") then
-		if typeof(firesignal) == "function" then
-			pcall(function()
-				firesignal(buy3Btn.Activated)
-				firesignal(buy3Btn.MouseButton1Click)
-			end)
+	if not pGui then return false end
+
+	local deadline = os.clock() + timeoutSeconds
+	while State.Running and (State.AutoAxeCrate or State.AutoTotemCrate) and os.clock() < deadline do
+		local cratePromptGui = pGui:FindFirstChild("CratePrompt")
+		local mainFrame = cratePromptGui and cratePromptGui:FindFirstChild("Main")
+		local buy3Btn = mainFrame and mainFrame:FindFirstChild("Buy3")
+
+		local isVisible = false
+		if cratePromptGui and cratePromptGui:IsA("ScreenGui") and cratePromptGui.Enabled then
+			isVisible = (mainFrame == nil or not mainFrame:IsA("GuiObject") or mainFrame.Visible)
+		elseif mainFrame and mainFrame:IsA("GuiObject") and mainFrame.Visible then
+			isVisible = true
+		end
+
+		if isVisible and buy3Btn and buy3Btn:IsA("GuiButton") then
+			if typeof(firesignal) == "function" then
+				pcall(function()
+					firesignal(buy3Btn.Activated)
+					firesignal(buy3Btn.MouseButton1Click)
+				end)
+			end
 			return true
 		end
+		task.wait(0.02)
 	end
 	return false
 end
 
 local function burstTapUnbox(durationSeconds: number)
 	local deadline = os.clock() + durationSeconds
-	local pGui = LocalPlayer:FindFirstChild("PlayerGui")
 	local camera = Workspace.CurrentCamera
 	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	local centerX = viewport.X * 0.5
-	local centerY = viewport.Y * 0.5
+	-- Target only the 3 center crate positions so HUD buttons are never clicked
+	local tapPoints = {
+		Vector2.new(viewport.X * 0.28, viewport.Y * 0.45),
+		Vector2.new(viewport.X * 0.50, viewport.Y * 0.45),
+		Vector2.new(viewport.X * 0.72, viewport.Y * 0.45)
+	}
 
 	while State.Running and (State.AutoAxeCrate or State.AutoTotemCrate) and os.clock() < deadline do
-		-- Fire signals on any visible unbox/crate buttons in PlayerGui
-		if pGui and typeof(firesignal) == "function" then
-			for _, gui in ipairs(pGui:GetChildren()) do
-				if gui.Name ~= "Rayfield" and gui.Name ~= "ProximityPrompts" and gui.Name ~= "CratePrompt" then
-					for _, desc in ipairs(gui:GetDescendants()) do
-						if (desc:IsA("TextButton") or desc:IsA("ImageButton")) and desc.Visible and desc.Active then
-							local nLower = string.lower(desc.Name)
-							if nLower ~= "x" and nLower ~= "close" and nLower ~= "autodelete" then
-								pcall(function()
-									firesignal(desc.Activated)
-									firesignal(desc.MouseButton1Click)
-								end)
-							end
-						end
-					end
-				end
+		if VirtualInputManager then
+			for _, pt in ipairs(tapPoints) do
+				pcall(function()
+					VirtualInputManager:SendMouseButtonEvent(pt.X, pt.Y, 0, true, game, 1)
+					VirtualInputManager:SendMouseButtonEvent(pt.X, pt.Y, 0, false, game, 1)
+				end)
 			end
 		end
-
-		-- Fast virtual tap/click burst across screen center
-		if VirtualInputManager then
-			pcall(function()
-				VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 1)
-				VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 1)
-			end)
-		end
-
-		task.wait(0.01)
+		task.wait(0.02)
 	end
 end
 
@@ -915,10 +913,12 @@ local function stepAutoCrate(crateType: "Axe" | "Totem")
 
 	if not isActive() then return end
 
-	triggerCratePrompt(crateType)
-	task.wait(0.04)
-	clickBuy3Button()
-	burstTapUnbox(0.65)
+	if triggerCratePrompt(crateType) then
+		if waitForCratePromptAndBuy3(0.5) then
+			task.wait(0.15)
+			burstTapUnbox(1.1)
+		end
+	end
 end
 
 -- ==========================================
